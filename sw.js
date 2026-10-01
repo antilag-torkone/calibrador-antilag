@@ -2,7 +2,7 @@
 // (criterio do PWA) e para funcionar offline depois da primeira visita.
 // Nao faz cache de nada alem dos arquivos do proprio app - a conexao
 // Bluetooth continua sendo feita direto pela pagina, isso aqui nao mexe nisso.
-var CACHE_NAME = "antilag-calibrador-v1";
+var CACHE_NAME = "antilag-calibrador-v2";
 var APP_SHELL = ["./", "./index.html", "./manifest.json", "./icon-192.png", "./icon-512.png"];
 
 self.addEventListener("install", function(ev){
