@@ -1,0 +1,828 @@
+<title>Calibrador Antilag BLE</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#5b93f5">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+/* Layout: painel unico, como o app oficial do fabricante (dashboard escuro,
+   dois medidores ao vivo em cima, campos grandes de calibracao embaixo,
+   barra de acoes fixa no rodape). Sem abas, sem dado tecnico a vista.
+   Protocolo real do modulo: Bluetooth "Nordic UART" (servico 6e400001...),
+   comandos e telemetria em texto puro, linha a linha, mesmo formato que
+   o modulo ja usa na serial USB (STATUS:CHAVE:valor / RT:CHAVE:valor). */
+:root{
+  --bg:#131110;
+  --surface:#1d1a16;
+  --surface-2:#272320;
+  --fg:#f2ede2;
+  --muted:#a89f8f;
+  --border:#37312a;
+  --accent:#5b93f5;
+  --accent-fg:#0b1220;
+  --ok:#5fbb85;
+  --ok-fg:#0d2416;
+  --warn:#e0b64c;
+  --danger:#e37069;
+  --mono-bg:#0b0a08;
+  --mono-fg:#f5efe4;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light){
+  :root:not([data-theme="dark"]){
+    --bg:#f6f3ee;--surface:#ffffff;--surface-2:#eeeae2;--fg:#1c1a17;--muted:#6b665e;
+    --border:#ddd8cf;--accent:#2f6fd6;--accent-fg:#ffffff;--ok:#2f7d4f;--ok-fg:#f2fdf6;
+    --warn:#b5860b;--danger:#b4362f;--mono-bg:#141210;--mono-fg:#f5efe4;color-scheme: light;
+  }
+}
+:root[data-theme="light"]{
+  --bg:#f6f3ee;--surface:#ffffff;--surface-2:#eeeae2;--fg:#1c1a17;--muted:#6b665e;
+  --border:#ddd8cf;--accent:#2f6fd6;--accent-fg:#ffffff;--ok:#2f7d4f;--ok-fg:#f2fdf6;
+  --warn:#b5860b;--danger:#b4362f;--mono-bg:#141210;--mono-fg:#f5efe4;color-scheme: light;
+}
+*{box-sizing:border-box}
+/* Este arquivo roda direto no navegador (sem o "empacotamento" que o link
+   do claude.ai adiciona), entao precisamos garantir nos mesmos que um
+   elemento com o atributo "hidden" fica mesmo escondido - caso contrario,
+   qualquer regra nossa que defina "display" pro mesmo elemento (ex: as
+   classes .pill e .inner usam display:flex) vence o padrao do navegador
+   e o elemento aparece mesmo estando "hidden". */
+[hidden]{display:none!important}
+body{background:var(--bg);color:var(--fg);font-family:'Sora',system-ui,sans-serif;padding-inline:16px;padding-block:0}
+h1,h2,h3{font-family:'Sora',system-ui,sans-serif;text-wrap:balance;margin:0}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-variant-numeric:tabular-nums}
+.wrap{max-width:640px;margin:0 auto}
+svg.stroke{fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+
+header.top{position:sticky;top:env(safe-area-inset-top,0px);z-index:10;background:var(--bg);
+  padding-block:14px 10px;margin-bottom:10px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand .mark{width:34px;height:34px;border-radius:9px;background:var(--accent);color:var(--accent-fg);
+  display:flex;align-items:center;justify-content:center;font-weight:800;font-size:15px;flex-shrink:0}
+.brand h1{font-size:17px;font-weight:700}
+.brand .sub{font-size:11.5px;color:var(--muted)}
+.redline{height:3px;border-radius:99px;margin-top:12px;
+  background:linear-gradient(90deg, var(--surface-2) 0%, var(--surface-2) 55%, var(--accent) 80%, var(--danger) 100%)}
+
+.status-row{display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 10px;border-radius:99px;
+  font-size:12px;font-weight:600;background:var(--surface-2);color:var(--muted);border:1px solid var(--border)}
+.pill .dot{width:7px;height:7px;border-radius:50%;background:var(--muted)}
+.pill.ok{color:var(--ok)} .pill.ok .dot{background:var(--ok)}
+.pill.warn{color:var(--warn)} .pill.warn .dot{background:var(--warn)}
+
+main{padding-bottom:calc(94px + env(safe-area-inset-bottom,0px))}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:16px;margin-bottom:14px}
+.card p.hint{font-size:12.5px;color:var(--muted);line-height:1.5;margin-top:4px}
+
+button.btn{font:inherit;font-weight:700;font-size:13.5px;border-radius:10px;border:1px solid transparent;
+  padding:11px 16px;cursor:pointer;width:100%}
+button.btn.primary{background:var(--accent);color:var(--accent-fg)}
+button.btn.secondary{background:var(--surface-2);color:var(--fg);border-color:var(--border)}
+button.btn.danger{background:var(--danger);color:#20100e}
+button.btn.go{background:var(--ok);color:var(--ok-fg)}
+button.btn:disabled{opacity:.45;cursor:not-allowed}
+button.btn.small{width:auto;padding:9px 13px;font-size:12px}
+button.btn.lg{padding:15px 18px;font-size:15px}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+.btn-row .btn{flex:1;min-width:120px}
+
+.unsupported{background:var(--surface-2);border:1px dashed var(--border);border-radius:12px;padding:14px;
+  font-size:13px;color:var(--fg);line-height:1.6;margin-bottom:14px}
+.unsupported strong{color:var(--accent)}
+
+.hero-connect{display:flex;flex-direction:column;align-items:center;text-align:center;gap:10px;padding:30px 18px}
+.connect-badge{width:60px;height:60px;border-radius:18px;background:var(--surface-2);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;margin-bottom:2px}
+.hero-connect h2{font-size:17px;font-weight:700}
+.hero-connect .btn-row{width:100%;margin-top:10px}
+
+.warning{border:1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background:color-mix(in srgb, var(--danger) 12%, var(--surface));border-radius:12px;padding:11px 13px;
+  font-size:12px;line-height:1.5;color:var(--fg);margin-bottom:12px}
+.warning strong{color:var(--danger)}
+
+/* ---- Medidores ao vivo ---- */
+.gauges-row{display:flex;gap:12px;justify-content:center;margin:4px 0 14px}
+.gauge{position:relative;width:150px;height:150px;flex:1;max-width:172px}
+.gauge svg{width:100%;height:100%;transform:rotate(-90deg)}
+.gauge .g-track{fill:none;stroke:var(--surface-2);stroke-width:10}
+.gauge .g-fill{fill:none;stroke:var(--accent);stroke-width:10;stroke-linecap:round;transition:stroke-dashoffset .35s ease}
+.gauge .g-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center}
+.gauge .g-value{font-family:'IBM Plex Mono',monospace;font-size:30px;font-weight:600;color:var(--fg);font-variant-numeric:tabular-nums}
+.gauge .g-unit{font-size:13px;color:var(--muted);margin-left:2px}
+.gauge .g-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-top:3px}
+@media (max-width:380px){.gauge{width:128px;height:128px}.gauge .g-value{font-size:23px}}
+
+/* Gravacao de log: registra rpm/avanco/etc ao longo do tempo e gera um
+   arquivo .csv pra abrir no celular (planilha) quando parar de gravar. */
+.record-row{display:flex;align-items:center;gap:10px;justify-content:center;flex-wrap:wrap;margin:0 0 14px}
+button.btn.record-btn{width:auto;display:inline-flex;align-items:center;gap:8px;
+  background:var(--surface-2);color:var(--fg);border:1px solid var(--border);padding:12px 18px}
+button.btn.record-btn.active{background:color-mix(in srgb, var(--danger) 16%, var(--surface-2));
+  border-color:var(--danger);color:var(--danger)}
+.rec-dot{width:9px;height:9px;border-radius:50%;background:var(--muted);flex-shrink:0}
+button.btn.record-btn.active .rec-dot{background:var(--danger);animation:recpulse 1s ease-in-out infinite}
+@keyframes recpulse{0%,100%{opacity:1}50%{opacity:.3}}
+@media (prefers-reduced-motion: reduce){button.btn.record-btn.active .rec-dot{animation:none}}
+.record-info{font-size:12px;color:var(--muted)}
+
+/* Chips extras (acelerador/embreagem): so aparecem se o modulo realmente
+   mandar esse dado - a maioria dos modulos desse fabricante nao tem esses
+   dois sensores ligados, entao nao faz sentido reservar espaco fixo pra
+   eles. Cada chip some por padrao e se revela sozinho na primeira leitura. */
+.extra-row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin:-6px 0 14px}
+.chip{display:flex;align-items:center;gap:7px;background:var(--surface-2);border:1px solid var(--border);
+  border-radius:99px;padding:7px 13px;font-size:12px}
+.chip .chip-label{color:var(--muted);font-weight:600}
+.chip .chip-value{font-family:'IBM Plex Mono',monospace;font-weight:700;color:var(--fg);font-variant-numeric:tabular-nums}
+
+/* ---- Painel de calibracao ---- */
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px}
+.panel-head h2{font-size:15.5px;font-weight:800;letter-spacing:.01em}
+.fwbadge{font-size:11px;font-weight:700;padding:4px 10px;border-radius:99px;background:var(--surface-2);
+  color:var(--muted);border:1px solid var(--border);flex-shrink:0}
+
+.group{padding-top:16px;border-top:1px solid var(--border);margin-top:16px}
+.group:first-of-type{padding-top:0;border-top:none;margin-top:6px}
+.grouphead{font-size:12px;text-transform:uppercase;letter-spacing:.03em;font-weight:800;color:var(--accent);margin-bottom:12px}
+
+.field-row{display:flex;flex-direction:column;gap:5px;margin-bottom:14px}
+.field-row:last-child{margin-bottom:0}
+.field-row label{font-size:13px;font-weight:700;color:var(--accent)}
+.field-row input[type=text],.field-row input[type=number]{font:inherit;font-size:21px;font-weight:600;padding:13px 14px;
+  border-radius:10px;border:1px solid var(--border);background:var(--surface-2);color:var(--fg);width:100%}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:4px 0 14px}
+.toggle-row label{font-size:13px;font-weight:700;color:var(--accent)}
+.switch{position:relative;width:48px;height:28px;flex-shrink:0}
+.switch input{opacity:0;width:100%;height:100%;position:absolute;margin:0;cursor:pointer}
+.switch .track{position:absolute;inset:0;background:var(--border);border-radius:99px;transition:background .15s}
+.switch .thumb{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:var(--surface);
+  transition:transform .15s;box-shadow:0 1px 2px rgba(0,0,0,.25)}
+.switch input:checked + .track{background:var(--accent)}
+.switch input:checked + .track + .thumb{transform:translateX(20px)}
+
+/* ---- Barra de acoes fixa ---- */
+.actionbar{position:fixed;left:0;right:0;bottom:0;z-index:20;background:var(--surface);border-top:1px solid var(--border)}
+.actionbar .inner{max-width:640px;margin:0 auto;display:flex;gap:8px;align-items:center;
+  padding:10px 12px calc(10px + env(safe-area-inset-bottom,0px))}
+.actionbar .btn.secondary{flex:0 0 auto;width:auto}
+.actionbar .btn.go{flex:1}
+.actionbar .confirm-text{flex:1;font-size:12.5px;color:var(--fg);line-height:1.35}
+.iconbtn{flex:0 0 auto;width:46px;height:46px;border-radius:10px;background:var(--surface-2);border:1px solid var(--border);
+  color:var(--fg);display:flex;align-items:center;justify-content:center;cursor:pointer}
+.iconbtn svg{width:20px;height:20px}
+.iconbtn.danger{color:var(--danger)}
+
+/* ---- Overlay de registro (log) ---- */
+.overlay{position:fixed;inset:0;z-index:30;background:var(--bg);padding:16px;
+  padding-top:calc(16px + env(safe-area-inset-top,0px));padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));
+  overflow-y:auto}
+.overlay-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px;max-width:640px;margin-inline:auto}
+.overlay-head h2{font-size:16px;font-weight:800}
+.overlay-body{max-width:640px;margin:0 auto}
+.log{background:var(--mono-bg);color:var(--mono-fg);border-radius:10px;padding:10px 12px;font-size:11.5px;
+  line-height:1.6;height:min(58vh,520px);overflow-y:auto;white-space:pre-wrap;word-break:break-word}
+.log .in{color:#9fd8a3}
+.log .out{color:#e0b64c}
+
+footer.legal{font-size:10.5px;color:var(--muted);text-align:center;padding:6px 0 4px;line-height:1.6}
+</style>
+
+<div class="wrap">
+  <header class="top">
+    <div class="brand">
+      <div class="mark">AL</div>
+      <div><h1>Calibrador Antilag BLE</h1><div class="sub">Bluetooth &middot; painel de calibra&ccedil;&atilde;o</div></div>
+    </div>
+    <div class="status-row">
+      <span id="statusPill" class="pill"><span class="dot"></span><span id="statusText">Desconectado</span></span>
+      <span id="devicePill" class="pill" hidden></span>
+    </div>
+    <div class="redline" aria-hidden="true"></div>
+  </header>
+
+  <main>
+    <section id="view-connect">
+      <div class="card hero-connect">
+        <div class="connect-badge">
+          <svg class="stroke" viewBox="0 0 24 24" style="width:30px;height:30px"><path d="M7 7l10 10-5 5V2l5 5L7 17"/></svg>
+        </div>
+        <h2>Conectar ao m&oacute;dulo</h2>
+        <p class="hint">Deixe o Bluetooth do celular ligado e o m&oacute;dulo energizado por perto, depois toque abaixo.</p>
+        <div class="btn-row">
+          <button class="btn primary lg" id="btnConnect">Conectar via Bluetooth</button>
+        </div>
+      </div>
+      <div id="unsupportedBox" class="unsupported" hidden>
+        Este navegador n&atilde;o suporta Bluetooth Web. No <strong>Android</strong>, abra este arquivo pelo Chrome ou Edge. No <strong>iPhone</strong>, o Safari (e qualquer navegador baseado nele) nunca vai suportar isso &mdash; &eacute; uma limita&ccedil;&atilde;o da Apple, n&atilde;o deste app. Uma alternativa &eacute; instalar o app gratuito <strong>Bluefy &ndash; Web BLE Browser</strong> na App Store e abrir este mesmo arquivo por ele.
+      </div>
+    </section>
+
+    <section id="view-panel" hidden>
+      <div class="gauges-row">
+        <div class="gauge">
+          <svg viewBox="0 0 120 120">
+            <circle class="g-track" cx="60" cy="60" r="52"/>
+            <circle class="g-fill" id="gaugeRpmArc" cx="60" cy="60" r="52"/>
+          </svg>
+          <div class="g-center"><div class="g-value" id="gaugeRpmValue">--</div><div class="g-label">RPM</div></div>
+        </div>
+        <div class="gauge">
+          <svg viewBox="0 0 120 120">
+            <circle class="g-track" cx="60" cy="60" r="52"/>
+            <circle class="g-fill" id="gaugeGrausArc" cx="60" cy="60" r="52"/>
+          </svg>
+          <div class="g-center"><div class="g-value" id="gaugeGrausValue">--<span class="g-unit">&deg;</span></div><div class="g-label">Avan&ccedil;o</div></div>
+        </div>
+      </div>
+
+      <div class="record-row" id="recordRow">
+        <button class="btn record-btn" id="btnRecord">
+          <span class="rec-dot" id="recDot"></span>
+          <span id="recordBtnLabel">Gravar log</span>
+        </button>
+        <span class="record-info mono" id="recordInfo" hidden>00:00 &middot; 0 amostras</span>
+      </div>
+
+      <div class="extra-row" id="extraRow" hidden>
+        <div class="chip" id="chipAcc" hidden><span class="chip-label">Acelerador</span><span class="chip-value" id="chipAccValue">--</span></div>
+        <div class="chip" id="chipClutch" hidden><span class="chip-label">Embreagem</span><span class="chip-value" id="chipClutchValue">--</span></div>
+      </div>
+
+      <div class="card panel-card">
+        <div class="panel-head">
+          <h2>Calibra&ccedil;&atilde;o Antilag</h2>
+          <span class="fwbadge" id="fwBadge">FW &mdash;</span>
+        </div>
+        <p class="hint" id="configStatus">Toque em "Reler status" para trazer os valores atuais do m&oacute;dulo.</p>
+
+        <div class="group">
+          <h3 class="grouphead">Antilag / Launch control (bot&atilde;o pressionado)</h3>
+          <div class="field-row">
+            <label>Atraso de Igni&ccedil;&atilde;o Inicial (&deg;)</label>
+            <input type="number" id="f_GRAUS_ATRASO" inputmode="numeric" placeholder="0-70">
+          </div>
+          <div class="field-row">
+            <label>Atraso de Igni&ccedil;&atilde;o Final (&deg;)</label>
+            <input type="number" id="f_GRAUS_ATRASO_FINAL" inputmode="numeric" placeholder="0-70">
+          </div>
+          <div class="field-row">
+            <label>Varia&ccedil;&atilde;o M&aacute;xima de RPM (malha fechada)</label>
+            <input type="number" id="f_RPM_ACIMA_MAX" inputmode="numeric">
+          </div>
+          <div class="toggle-row">
+            <label for="f_RPM_TARGET_FIXO">RPM fixo (ON/OFF)</label>
+            <label class="switch"><input type="checkbox" id="f_RPM_TARGET_FIXO"><span class="track"></span><span class="thumb"></span></label>
+          </div>
+          <div class="field-row">
+            <label>RPM fixo (valor em RPM)</label>
+            <input type="number" id="f_RPM_TARGET_VALOR" inputmode="numeric">
+          </div>
+        </div>
+
+        <div class="group">
+          <h3 class="grouphead">Hardcut (embreagem pressionada + bot&atilde;o pressionado)</h3>
+          <div class="field-row">
+            <label>RPM do Hardcut</label>
+            <input type="number" id="f_RPM_HARDCUT" inputmode="numeric">
+          </div>
+        </div>
+
+        <div class="group">
+          <h3 class="grouphead">Flatshift (troca de marcha sem retirar o p&eacute; do acelerador)</h3>
+          <div class="field-row">
+            <label>Atraso de Igni&ccedil;&atilde;o no FlatShift</label>
+            <input type="number" id="f_GRAUS_FLATSHIFT" inputmode="numeric" placeholder="0-70">
+          </div>
+          <div class="field-row">
+            <label>Dura&ccedil;&atilde;o M&aacute;xima do FlatShift</label>
+            <input type="number" id="f_TEMPO_FLATSHIFT" inputmode="numeric">
+          </div>
+        </div>
+
+        <div class="group">
+          <h3 class="grouphead">Ajustes de tens&atilde;o</h3>
+          <div class="field-row">
+            <label>Tens&atilde;o M&iacute;nima do Acelerador (V)</label>
+            <input type="text" id="f_TENSAO_MIN_ACC" inputmode="decimal" placeholder="ex: 1.5">
+          </div>
+        </div>
+      </div>
+
+      <div class="warning">
+        <strong>Antes de gravar:</strong> isso altera par&acirc;metros reais de igni&ccedil;&atilde;o. Confira os valores contra o que voc&ecirc; j&aacute; sabe do m&oacute;dulo e teste em marcha lenta antes de rodar.
+      </div>
+    </section>
+
+    <footer class="legal">
+      Ferramenta independente, sem v&iacute;nculo com o fabricante do m&oacute;dulo. Requer Web Bluetooth (Chrome/Edge no Android, ou Bluefy no iPhone).
+    </footer>
+  </main>
+</div>
+
+<div class="actionbar" id="actionbar" hidden>
+  <div class="inner" id="actionbarNormal">
+    <button class="btn secondary" id="btnReadStatus">Reler status</button>
+    <button class="btn go" id="btnSendConfig">Enviar Configura&ccedil;&atilde;o</button>
+    <button class="iconbtn" id="btnOpenLog" title="Registro" aria-label="Registro">
+      <svg class="stroke" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h7M7 17h4"/></svg>
+    </button>
+    <button class="iconbtn danger" id="btnDisconnect2" title="Desconectar" aria-label="Desconectar">
+      <svg class="stroke" viewBox="0 0 24 24"><path d="M12 2v8"/><path d="M18.4 6.6a9 9 0 1 1-12.8 0"/></svg>
+    </button>
+  </div>
+  <div class="inner" id="actionbarConfirm" hidden>
+    <span class="confirm-text">Confirmar grava&ccedil;&atilde;o no m&oacute;dulo?</span>
+    <button class="btn secondary small" id="btnCancelSend">Cancelar</button>
+    <button class="btn danger small" id="btnConfirmSend">Sim, gravar</button>
+  </div>
+</div>
+
+<div class="overlay" id="logOverlay" hidden>
+  <div class="overlay-head">
+    <h2>Registro</h2>
+    <button class="btn secondary small" id="btnCloseLog">Fechar</button>
+  </div>
+  <div class="overlay-body">
+    <p class="hint" style="margin-bottom:10px">Linhas cruas recebidas e enviadas &mdash; &uacute;til se algo n&atilde;o bater com o esperado.</p>
+    <div class="btn-row" style="margin-bottom:10px">
+      <button class="btn secondary" id="btnReadNow">Ler valor agora (sem notifica&ccedil;&atilde;o)</button>
+    </div>
+    <div class="log mono" id="logBox"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  var SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+  var CONTROL_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"; // escrita (comandos)
+  var STATUS_UUID  = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"; // notify (status + telemetria)
+
+  var RPM_GAUGE_MAX = 9000;
+  var GRAUS_GAUGE_MAX = 70;
+  var GAUGE_R = 52;
+  var GAUGE_C = 2 * Math.PI * GAUGE_R;
+
+  // Campos de configuracao: chave do protocolo -> {inputId, kind, clampMax}
+  var CONFIG_FIELDS = [
+    {key:'GRAUS_ATRASO', id:'f_GRAUS_ATRASO', kind:'int', clampMax:70},
+    {key:'GRAUS_FLATSHIFT', id:'f_GRAUS_FLATSHIFT', kind:'int', clampMax:70},
+    {key:'GRAUS_ATRASO_FINAL', id:'f_GRAUS_ATRASO_FINAL', kind:'int', clampMax:70},
+    {key:'TEMPO_FLATSHIFT', id:'f_TEMPO_FLATSHIFT', kind:'int'},
+    {key:'TENSAO_MIN_ACC', id:'f_TENSAO_MIN_ACC', kind:'float'},
+    {key:'RPM_ACIMA_MAX', id:'f_RPM_ACIMA_MAX', kind:'int'},
+    {key:'RPM_TARGET_FIXO', id:'f_RPM_TARGET_FIXO', kind:'bool'},
+    {key:'RPM_TARGET_VALOR', id:'f_RPM_TARGET_VALOR', kind:'int'},
+    {key:'RPM_HARDCUT', id:'f_RPM_HARDCUT', kind:'int'},
+  ];
+
+  var state = { device:null, server:null, controlChar:null, statusChar:null, connected:false };
+
+  // ---------- Gravacao de log (rpm/avanco/etc ao longo do tempo) ----------
+  var rec = {
+    active:false, rows:[], startTime:0, timer:null,
+    last:{ rpm:null, graus:null, acc:null, clutch:null, button:null, hardcut:null }
+  };
+
+  function $(id){ return document.getElementById(id); }
+
+  // ---------- Medidores (gauges) ----------
+  function initGauge(arcId){
+    var el = $(arcId);
+    el.style.strokeDasharray = GAUGE_C;
+    el.style.strokeDashoffset = GAUGE_C;
+  }
+  function setGauge(arcId, value, max){
+    var pct = Math.max(0, Math.min(1, value / max));
+    $(arcId).style.strokeDashoffset = GAUGE_C * (1 - pct);
+  }
+  initGauge('gaugeRpmArc');
+  initGauge('gaugeGrausArc');
+
+  // ---------- Suporte ----------
+  var supported = !!(navigator.bluetooth);
+  if(!supported){ $("unsupportedBox").hidden = false; $("btnConnect").disabled = true; }
+
+  // ---------- Log ----------
+  function logLine(text, cls){
+    var box = $("logBox");
+    var div = document.createElement("div");
+    if(cls) div.className = cls;
+    div.textContent = text;
+    box.appendChild(div);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  // ---------- Registro (overlay) ----------
+  $("btnOpenLog").addEventListener("click", function(){ $("logOverlay").hidden = false; });
+  $("btnCloseLog").addEventListener("click", function(){ $("logOverlay").hidden = true; });
+
+  // ---------- Status UI ----------
+  function setStatus(text, mode){
+    $("statusPill").className = "pill" + (mode ? " " + mode : "");
+    $("statusText").textContent = text;
+  }
+
+  // ---------- Conexao ----------
+  $("btnConnect").addEventListener("click", connect);
+  $("btnDisconnect2").addEventListener("click", disconnect);
+
+  function connect(){
+    if(!supported) return;
+    setStatus("Procurando dispositivo...", "warn");
+    navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }],
+      optionalServices: [SERVICE_UUID]
+    }).catch(function(){
+      // fallback: alguns firmwares nao anunciam o UUID do servico no pacote de advertising
+      return navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [SERVICE_UUID] });
+    }).then(function(device){
+      state.device = device;
+      device.addEventListener("gattserverdisconnected", onDisconnected);
+      setStatus("Conectando...", "warn");
+      return device.gatt.connect();
+    }).then(function(server){
+      state.server = server;
+      return server.getPrimaryService(SERVICE_UUID);
+    }).then(function(service){
+      return Promise.all([
+        service.getCharacteristic(CONTROL_UUID),
+        service.getCharacteristic(STATUS_UUID)
+      ]);
+    }).then(function(chars){
+      state.controlChar = chars[0];
+      state.statusChar = chars[1];
+      state.connected = true;
+      logLine("controle props: " + propsToStr(state.controlChar.properties));
+      logLine("status props: " + propsToStr(state.statusChar.properties));
+      return state.statusChar.startNotifications();
+    }).then(function(){
+      logLine("--- notificacoes de status ativadas ---");
+      state.statusChar.addEventListener("characteristicvaluechanged", onStatusNotify);
+      onConnected();
+    }).catch(function(err){
+      console.error(err);
+      var msg = (err && err.message) ? err.message : String(err);
+      logLine("!! erro ao conectar: " + msg);
+      if(/NotFoundError|cancel/i.test(msg)){ setStatus("Desconectado", ""); return; }
+      setStatus("Falha ao conectar", "");
+    });
+  }
+
+  function propsToStr(p){
+    if(!p) return "(sem info)";
+    var out = [];
+    ["read","write","writeWithoutResponse","notify","indicate"].forEach(function(k){
+      if(p[k]) out.push(k);
+    });
+    return out.length ? out.join(", ") : "(nenhuma propriedade reportada)";
+  }
+
+  function onConnected(){
+    setStatus((state.device.name || "Modulo") + " conectado", "ok");
+    $("view-connect").hidden = true;
+    $("view-panel").hidden = false;
+    $("actionbar").hidden = false;
+    var dp = $("devicePill");
+    dp.hidden = false;
+    dp.innerHTML = '<span class="dot"></span><span>' + (state.device.name || "sem nome") + '</span>';
+    $("configStatus").textContent = "Conectado. Lendo status do módulo...";
+    logLine("--- conectado (" + (state.device.name||"?") + ") ---");
+    // pede status inicial
+    setTimeout(function(){
+      sendCommand("STATUS").catch(function(err){ logLine("!! falha ao pedir STATUS: " + err.message); });
+    }, 400);
+  }
+
+  function onDisconnected(){
+    state.connected = false;
+    if(rec.active){ stopRecording(); } // salva o que ja foi gravado antes de sumir o painel
+    setStatus("Desconectado", "");
+    $("view-connect").hidden = false;
+    $("view-panel").hidden = true;
+    $("actionbar").hidden = true;
+    $("logOverlay").hidden = true;
+    $("devicePill").hidden = true;
+    $("actionbarConfirm").hidden = true;
+    $("actionbarNormal").hidden = false;
+    setGauge('gaugeRpmArc', 0, RPM_GAUGE_MAX);
+    setGauge('gaugeGrausArc', 0, GRAUS_GAUGE_MAX);
+    $("gaugeRpmValue").textContent = "--";
+    $("gaugeGrausValue").innerHTML = '--<span class="g-unit">°</span>';
+    $("fwBadge").textContent = "FW —";
+    $("extraRow").hidden = true;
+    $("chipAcc").hidden = true;
+    $("chipClutch").hidden = true;
+    logLine("--- desconectado ---");
+  }
+
+  function disconnect(){
+    if(state.device && state.device.gatt.connected){ state.device.gatt.disconnect(); }
+    else { onDisconnected(); }
+  }
+
+  // ---------- Envio de comandos de texto ----------
+  function sendCommand(cmd){
+    if(!state.connected || !state.controlChar){ return Promise.reject(new Error("nao conectado")); }
+    var bytes = new TextEncoder().encode(cmd);
+    logLine(">> " + cmd, "out");
+    var c = state.controlChar;
+    var p = c.properties || {};
+
+    function attempt(){
+      // tenta na ordem que a propriedade reportada sugere; se falhar, tenta a outra
+      if(p.writeWithoutResponse){
+        return c.writeValueWithoutResponse(bytes).catch(function(e1){
+          if(typeof c.writeValueWithResponse === 'function'){
+            return c.writeValueWithResponse(bytes).catch(function(e2){ throw e1; });
+          }
+          throw e1;
+        });
+      }
+      if(p.write){
+        return c.writeValueWithResponse(bytes).catch(function(e1){
+          if(typeof c.writeValueWithoutResponse === 'function'){
+            return c.writeValueWithoutResponse(bytes).catch(function(e2){ throw e1; });
+          }
+          throw e1;
+        });
+      }
+      // Android/Chrome as vezes nao reporta as propriedades certas: tenta os dois metodos existentes
+      if(typeof c.writeValueWithoutResponse === 'function'){
+        return c.writeValueWithoutResponse(bytes);
+      }
+      return c.writeValueWithResponse(bytes);
+    }
+
+    return attempt().catch(function(err){
+      logLine("!! erro ao enviar \"" + cmd + "\": " + err.message);
+      throw err;
+    });
+  }
+
+  function delay(ms){ return new Promise(function(res){ setTimeout(res, ms); }); }
+
+  function bytesToHex(bytes){
+    var out = [];
+    for(var i=0;i<bytes.length;i++){ out.push(bytes[i].toString(16).padStart(2,'0')); }
+    return out.join(' ');
+  }
+
+  // ---------- Leitura manual (bypass notificacao) ----------
+  function readNow(){
+    if(!state.connected || !state.statusChar){ logLine("!! nao conectado, nao da pra ler"); return; }
+    logLine("--- lendo valor da caracteristica de status manualmente ---");
+    state.statusChar.readValue().then(function(dv){
+      var bytes = new Uint8Array(dv.buffer);
+      var text = new TextDecoder("utf-8").decode(bytes);
+      logLine("[leitura manual] " + bytes.length + " bytes: " + bytesToHex(bytes) + "  texto: " + JSON.stringify(text));
+      if(bytes.length){
+        text.split("\n").forEach(function(raw){
+          var line = raw.replace(/[\r\n]+$/,'').trim();
+          if(line.length) handleLine(line);
+        });
+      }
+    }).catch(function(err){
+      logLine("!! erro na leitura manual: " + (err && err.message ? err.message : String(err)));
+    });
+  }
+
+  // ---------- Recepcao / parsing de linhas ----------
+  // Este modulo manda cada linha (RT:... / STATUS:...) em um pacote BLE
+  // separado, sem caractere de quebra de linha no final. Por isso cada
+  // notificacao e tratada como uma linha completa por si so.
+  function onStatusNotify(ev){
+    var bytes = new Uint8Array(ev.target.value.buffer);
+    var text = new TextDecoder("utf-8").decode(bytes);
+    logLine("[notify recebida] " + bytes.length + " bytes: " + bytesToHex(bytes) + "  texto: " + JSON.stringify(text));
+    text.split(/\r?\n/).forEach(function(raw){
+      var line = raw.trim();
+      if(line.length) handleLine(line);
+    });
+  }
+
+  function handleLine(line){
+    logLine("<< " + line, "in");
+    if(line.indexOf("RT:") === 0){
+      handleTelemetry(line.substring(3));
+      return;
+    }
+    if(line.indexOf("STATUS:") === 0){
+      handleStatus(line.substring(7));
+      return;
+    }
+  }
+
+  function handleTelemetry(rest){
+    if(rest.indexOf("RPM:") === 0){
+      var n = parseFloat(rest.substring(4));
+      rec.last.rpm = isNaN(n) ? null : Math.round(n);
+      $("gaugeRpmValue").textContent = isNaN(n) ? rest.substring(4) : Math.round(n);
+      if(!isNaN(n)) setGauge('gaugeRpmArc', n, RPM_GAUGE_MAX);
+      return;
+    }
+    if(rest.indexOf("GRAUS:") === 0){
+      var g = parseFloat(rest.substring(6));
+      rec.last.graus = isNaN(g) ? null : g;
+      $("gaugeGrausValue").innerHTML = (isNaN(g) ? rest.substring(6) : g) + '<span class="g-unit">°</span>';
+      if(!isNaN(g)) setGauge('gaugeGrausArc', g, GRAUS_GAUGE_MAX);
+      return;
+    }
+    if(rest.indexOf("ACC:") === 0){
+      var acc = parseFloat(rest.substring(4));
+      rec.last.acc = isNaN(acc) ? null : acc;
+      if(!isNaN(acc)){
+        $("extraRow").hidden = false;
+        $("chipAcc").hidden = false;
+        $("chipAccValue").textContent = acc.toFixed(2) + " V";
+      }
+      return;
+    }
+    if(rest.indexOf("CLUTCH:") === 0){
+      var clu = parseFloat(rest.substring(7));
+      rec.last.clutch = isNaN(clu) ? null : clu;
+      if(!isNaN(clu)){
+        $("extraRow").hidden = false;
+        $("chipClutch").hidden = false;
+        $("chipClutchValue").textContent = clu.toFixed(2) + " V";
+      }
+      return;
+    }
+    if(rest.indexOf("BUTSTATE:") === 0){
+      var bv = parseInt(rest.substring(9), 10);
+      rec.last.button = isNaN(bv) ? null : bv;
+      return;
+    }
+    if(rest.indexOf("HARDCUT:") === 0){
+      var hv = parseInt(rest.substring(8), 10);
+      rec.last.hardcut = isNaN(hv) ? null : hv;
+      return;
+    }
+  }
+
+  // ---------- Botao de gravar log ----------
+  $("btnRecord").addEventListener("click", function(){
+    if(!state.connected) return;
+    if(!rec.active){ startRecording(); } else { stopRecording(); }
+  });
+
+  function startRecording(){
+    rec.active = true;
+    rec.rows = [];
+    rec.startTime = Date.now();
+    $("btnRecord").classList.add("active");
+    $("recordBtnLabel").textContent = "Parar e salvar";
+    $("recordInfo").hidden = false;
+    logLine("--- gravacao de log iniciada ---");
+    updateRecordInfo();
+    rec.timer = setInterval(function(){
+      var elapsed = (Date.now() - rec.startTime) / 1000;
+      rec.rows.push([
+        elapsed.toFixed(2),
+        rec.last.rpm === null ? '' : rec.last.rpm,
+        rec.last.graus === null ? '' : rec.last.graus,
+        rec.last.acc === null ? '' : rec.last.acc.toFixed(2),
+        rec.last.clutch === null ? '' : rec.last.clutch.toFixed(2),
+        rec.last.button === null ? '' : rec.last.button,
+        rec.last.hardcut === null ? '' : rec.last.hardcut
+      ]);
+      updateRecordInfo();
+    }, 200);
+  }
+
+  function updateRecordInfo(){
+    var elapsed = rec.active ? (Date.now() - rec.startTime) / 1000 : 0;
+    var mm = Math.floor(elapsed / 60);
+    var ss = Math.floor(elapsed % 60);
+    var mmss = (mm < 10 ? '0' : '') + mm + ':' + (ss < 10 ? '0' : '') + ss;
+    $("recordInfo").textContent = mmss + " · " + rec.rows.length + " amostras";
+  }
+
+  function stopRecording(){
+    rec.active = false;
+    clearInterval(rec.timer);
+    $("btnRecord").classList.remove("active");
+    $("recordBtnLabel").textContent = "Gravar log";
+    downloadCsv();
+  }
+
+  function downloadCsv(){
+    if(rec.rows.length === 0){
+      $("recordInfo").textContent = "Nenhuma amostra gravada.";
+      logLine("--- gravacao parada: nenhuma amostra ---");
+      return;
+    }
+    var header = "tempo_s,rpm,avanco_graus,acelerador_v,embreagem_v,botao,hardcut\n";
+    var body = rec.rows.map(function(r){ return r.join(","); }).join("\n");
+    var csv = header + body + "\n";
+    var blob = new Blob([csv], {type:"text/csv"});
+    var url = URL.createObjectURL(blob);
+    var now = new Date();
+    var pad = function(n){ return (n < 10 ? '0' : '') + n; };
+    var fname = "antilag_log_" + now.getFullYear() + pad(now.getMonth()+1) + pad(now.getDate()) +
+      "_" + pad(now.getHours()) + pad(now.getMinutes()) + ".csv";
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = fname;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 4000);
+    $("recordInfo").textContent = rec.rows.length + " amostras salvas em " + fname;
+    logLine("--- log salvo: " + fname + " (" + rec.rows.length + " amostras) ---");
+  }
+
+  function handleStatus(rest){
+    var idx = rest.indexOf(":");
+    if(idx < 0) return;
+    var key = rest.substring(0, idx);
+    var val = rest.substring(idx + 1);
+    if(key === "FW_VERSION"){ $("fwBadge").textContent = "FW " + val; return; }
+    var field = CONFIG_FIELDS.filter(function(f){ return f.key === key; })[0];
+    if(!field) return;
+    var el = $(field.id);
+    if(field.kind === "bool"){
+      el.checked = (val !== "0");
+    } else {
+      el.value = val;
+    }
+  }
+
+  // ---------- Leitura manual direta da caracteristica (bypass notificacao) ----------
+  $("btnReadNow").addEventListener("click", readNow);
+
+  // ---------- Ler status sob demanda ----------
+  $("btnReadStatus").addEventListener("click", function(){
+    if(!state.connected){ return; }
+    $("configStatus").textContent = "Lendo...";
+    sendCommand("STATUS").then(function(){
+      setTimeout(function(){ $("configStatus").textContent = "Status atualizado ✓"; }, 600);
+    }).catch(function(err){ $("configStatus").textContent = "Erro: " + err.message; });
+  });
+
+  // ---------- Gravar configuracao ----------
+  $("btnSendConfig").addEventListener("click", function(){
+    if(!state.connected){ return; }
+    $("actionbarNormal").hidden = true;
+    $("actionbarConfirm").hidden = false;
+  });
+
+  $("btnCancelSend").addEventListener("click", function(){
+    $("actionbarConfirm").hidden = true;
+    $("actionbarNormal").hidden = false;
+  });
+
+  $("btnConfirmSend").addEventListener("click", function(){
+    $("actionbarConfirm").hidden = true;
+    $("actionbarNormal").hidden = false;
+    doSendConfig();
+  });
+
+  function clampInt(str, maxVal){
+    var n = parseInt(str, 10);
+    if(isNaN(n)) return str;
+    if(maxVal !== undefined && n > maxVal) n = maxVal;
+    return String(n);
+  }
+
+  function doSendConfig(){
+    var commands = [];
+    CONFIG_FIELDS.forEach(function(f){
+      var el = $(f.id);
+      var raw;
+      if(f.kind === "bool"){
+        raw = el.checked ? "1" : "0";
+      } else {
+        raw = (el.value || "").trim();
+        if(raw === "") return; // campo vazio: nao envia (mesmo comportamento do app oficial)
+        if(f.kind === "int"){ raw = clampInt(raw, f.clampMax); }
+        if(f.kind === "float"){ raw = raw.replace(",", "."); }
+      }
+      commands.push(f.key + ":" + raw);
+    });
+
+    $("configStatus").textContent = "Enviando...";
+    var p = Promise.resolve();
+    commands.forEach(function(cmd){
+      p = p.then(function(){ return sendCommand(cmd); }).then(function(){ return delay(300); });
+    });
+    p.then(function(){ return sendCommand("STATUS"); })
+     .then(function(){ $("configStatus").textContent = "Configuração enviada ✓"; })
+     .catch(function(err){ $("configStatus").textContent = "Erro ao gravar: " + err.message; });
+  }
+  // ---------- PWA: registra o service worker (precisa estar hospedado em
+  // https para funcionar - em arquivo local isso falha silenciosamente,
+  // sem quebrar o resto do app). ----------
+  if("serviceWorker" in navigator){
+    window.addEventListener("load", function(){
+      navigator.serviceWorker.register("sw.js").catch(function(err){
+        console.warn("service worker nao registrado:", err);
+      });
+    });
+  }
+})();
+</script>
